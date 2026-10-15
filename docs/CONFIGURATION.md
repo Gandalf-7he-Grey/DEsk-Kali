@@ -18,6 +18,7 @@ unless set otherwise.
 | `/etc/xdg/desk/shell.conf` | the installer | The machine's defaults, under each user's own file; the installer writes the Graphics level it measured. |
 | `$XDG_CONFIG_HOME/desk/displays.conf` | DEsk | How a display tool last arranged each set of screens. |
 | `$XDG_CONFIG_HOME/desk/drawer` | DEsk | The programs in the drawer, in order. |
+| `$XDG_CONFIG_HOME/desk/taskbar` | DEsk | The programs pinned to the taskbar rail, in order (`thing <terminal\|browser\|files\|editor>` or `app <desktop file id>`). Not written until something is pinned or moved. |
 | `$XDG_CONFIG_HOME/desk/shelves.conf` | you | Programs filed on a shelf other than their own. |
 | `~/.config/desk-mimeapps.list` | you | Default programs inside DEsk only, before `mimeapps.list`. |
 | `$XDG_DATA_HOME/desk/calendar` | DEsk | Notes stuck on the calendar. |
@@ -88,6 +89,7 @@ One `key = value` per line; `#` starts a comment.
 | Key | Values | Default | |
 | --- | --- | --- | --- |
 | `drawer_closes` | `yes`, `no` | `yes` | Close the drawer after something in it is used. |
+| `taskbar` | `yes`, `no` | `yes` | A rail along the front of the desk, over the drawer's pull, holding the programs pinned to it: one click starts one, and one is carried along the rail with the mouse to move it. Pin a program with the pin at the head of its line in the ALL APPS book (the same pin takes it off). It holds programs only, and what it has to begin with is DEsk's four standard programs. Windows keep clear of it. It is not shown while the drawer is out, at the bookcase, Control Panel or post box, at the lock or login, or when a window has the whole screen. |
 | `fold_into_drawer` | `yes`, `no` | `no` | Folded windows go into the drawer instead of lying on the desk. |
 | `take_sheet` | `yes`, `no` | `yes` | A program taken from ALL APPS has its sheet carried down first. |
 | `app.terminal`, `app.browser`, `app.files`, `app.editor` | a desktop file id (`xfce4-terminal.desktop`) | | The standard programs, instead of DEsk's choice. |

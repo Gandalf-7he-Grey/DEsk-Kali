@@ -12332,6 +12332,345 @@ cairo_surface_t *desk_drawer_item_picture(int screen_w, int screen_h,
 	return out;
 }
 
+/* ---- the rail ----------------------------------------------------
+ * The programs kept in the drawer, set out along the front of the desk
+ * where they can be reached with the drawer shut: a walnut rail with a
+ * brass lip, a strip of the drawer's own green felt let into it, and the
+ * same things standing on the felt that lie in the drawer. The hand on one
+ * lifts it, and a brass plate over it says what it is. */
+
+int desk_rail_height(int screen_w, int screen_h)
+{
+	(void)screen_w;
+	return (int)clampf(round(screen_h * 0.066), 48.0, 78.0);
+}
+
+int desk_rail_reserve(int screen_w, int screen_h)
+{
+	/* the rail, and a little air between it and the windows above */
+	return desk_rail_height(screen_w, screen_h) + 8;
+}
+
+struct rail_geo {
+	double x0, y0, w, h;       /* the rail itself, on the screen */
+	double first, pitch, size; /* the middle of the first thing, the way apart, how big */
+};
+
+static bool rail_geo_of(int sw, int sh, int n, struct rail_geo *g)
+{
+	if (n <= 0 || sw < 200 || sh < 200) {
+		return false;
+	}
+	double rh = desk_rail_height(sw, sh);
+	double size = rh * 0.80, pitch = rh * 1.30, pad = rh * 0.40;
+	double want = n * pitch + pad * 2.0, room = sw * 0.92;
+	if (want > room) {
+		double k = room / want;
+		pitch *= k;
+		pad *= k;
+		size *= fmax(k, 0.62);
+	}
+	g->h = rh;
+	g->w = n * pitch + pad * 2.0;
+	g->x0 = floor((sw - g->w) * 0.5);
+	/* just over the pull of the drawer, which stays where it is */
+	g->y0 = sh - desk_drawer_pull_h(sw, sh) - 4.0 - rh;
+	g->first = g->x0 + pad + pitch * 0.5;
+	g->pitch = pitch;
+	g->size = size;
+	return true;
+}
+
+/* What the rail's picture covers: the rail, headroom for the plate over a
+ * thing, and the shadow under it. */
+bool desk_rail_box(int screen_w, int screen_h, int n, double box[4])
+{
+	struct rail_geo g;
+	if (!rail_geo_of(screen_w, screen_h, n, &g)) {
+		return false;
+	}
+	double x0 = fmax(g.x0 - 90.0, 0.0), x1 = fmin(g.x0 + g.w + 90.0, (double)screen_w);
+	double y0 = fmax(g.y0 - 44.0, 0.0), y1 = fmin(g.y0 + g.h + 14.0, (double)screen_h);
+	box[0] = floor(x0);
+	box[1] = floor(y0);
+	box[2] = ceil(x1) - box[0];
+	box[3] = ceil(y1) - box[1];
+	return box[2] > 8.0 && box[3] > 8.0;
+}
+
+int desk_rail_hit(int screen_w, int screen_h, int n, double px, double py)
+{
+	struct rail_geo g;
+	if (!rail_geo_of(screen_w, screen_h, n, &g) || px < g.x0 || px >= g.x0 + g.w
+		|| py < g.y0 - 2.0 || py >= g.y0 + g.h) {
+		return -1;
+	}
+	int i = (int)floor((px - (g.first - g.pitch * 0.5)) / g.pitch);
+	return i < 0 ? 0 : (i >= n ? n - 1 : i);
+}
+
+int desk_rail_slot(int screen_w, int screen_h, int n, double px)
+{
+	struct rail_geo g;
+	if (!rail_geo_of(screen_w, screen_h, n, &g)) {
+		return 0;
+	}
+	int i = (int)floor((px - (g.first - g.pitch * 0.5)) / g.pitch);
+	return i < 0 ? 0 : (i >= n ? n - 1 : i);
+}
+
+cairo_surface_t *desk_rail_item_picture(const struct desk_drawer_item *it, double ppu,
+	double *ax, double *ay)
+{
+	/* upright and on its own: nothing of the room is needed to draw it */
+	return drawer_item_image(NULL, it, ppu, 1.0, ax, ay, true);
+}
+
+/* A thing drawn once for the size it is shown at, and kept: the hand
+ * moving along the rail asks for the rail again at every step. */
+struct rail_pic {
+	int look;
+	unsigned seed, namesum;
+	const cairo_surface_t *icon;
+	int ppu16;
+	cairo_surface_t *surf;
+	double ax, ay;
+	unsigned used;
+};
+#define RAIL_PICS 48
+static struct rail_pic g_rail_pics[RAIL_PICS];
+static unsigned g_rail_tick;
+
+static unsigned rail_name_sum(const char *s)
+{
+	unsigned h = 2166136261u;
+	for (; *s; s++) {
+		h = (h ^ (unsigned char)*s) * 16777619u;
+	}
+	return h;
+}
+
+static const struct rail_pic *rail_pic_for(const struct desk_drawer_item *it, double ppu)
+{
+	int ppu16 = (int)lround(ppu * 16.0);
+	unsigned sum = rail_name_sum(it->name) ^ rail_name_sum(it->initial);
+	struct rail_pic *spare = &g_rail_pics[0];
+	g_rail_tick++;
+	for (int i = 0; i < RAIL_PICS; i++) {
+		struct rail_pic *p = &g_rail_pics[i];
+		if (p->surf && p->look == it->look && p->seed == it->seed && p->namesum == sum
+			&& p->icon == it->icon && p->ppu16 == ppu16) {
+			p->used = g_rail_tick;
+			return p;
+		}
+		if (!p->surf || p->used < spare->used) {
+			spare = !spare->surf ? spare : p;
+		}
+	}
+	if (spare->surf) {
+		cairo_surface_destroy(spare->surf);
+		spare->surf = NULL;
+	}
+	spare->surf = desk_rail_item_picture(it, ppu, &spare->ax, &spare->ay);
+	if (!spare->surf) {
+		return NULL;
+	}
+	spare->look = it->look;
+	spare->seed = it->seed;
+	spare->namesum = sum;
+	spare->icon = it->icon;
+	spare->ppu16 = ppu16;
+	spare->used = g_rail_tick;
+	return spare;
+}
+
+static double rail_text_w(cairo_t *cr, const char *s, double size)
+{
+	char clean[1024];
+	s = utf8_clean(s, clean, sizeof clean);
+	cairo_save(cr);
+	desk_font_select(cr, DESK_FONT_ENGRAVE, s, true, false);
+	cairo_set_font_size(cr, size);
+	cairo_text_extents_t ext;
+	cairo_text_extents(cr, s, &ext);
+	cairo_restore(cr);
+	return ext.x_advance;
+}
+
+/* cr is in screen coordinates (the caller moves its origin to the box's);
+ * hover is the thing the hand is over, pressed the one it is holding down. */
+void desk_rail_paint(cairo_t *cr, int screen_w, int screen_h,
+	const struct desk_drawer_item *items, int n, int hover, int pressed, int carry,
+	double carry_x)
+{
+	struct rail_geo g;
+	double box[4];
+	if (!rail_geo_of(screen_w, screen_h, n, &g) || !desk_rail_box(screen_w, screen_h, n, box)) {
+		return;
+	}
+	double x0 = g.x0, y0 = g.y0, w = g.w, h = g.h, r = h * 0.16;
+
+	/* the rail's shadow on the desk, wider and fainter the further out */
+	if (gfx_shadows()) {
+		for (int i = 0; i < 7; i++) {
+			double e = 1.0 + i * 1.7;
+			cairo_set_source_rgba(cr, 0.04, 0.03, 0.02, 0.075);
+			desk_rounded_path(cr, x0 - e, y0 + 2.0 - e * 0.35, w + 2.0 * e, h + e * 1.5, r + e);
+			cairo_fill(cr);
+		}
+	}
+
+	/* the walnut */
+	cairo_save(cr);
+	desk_rounded_path(cr, x0, y0, w, h, r);
+	cairo_clip(cr);
+	fill_wood(cr, x0, y0, w, h);
+	overlay_grain(cr, x0, y0, w, h, 1.0);
+	cairo_pattern_t *lit = cairo_pattern_create_linear(0, y0, 0, y0 + h);
+	cairo_pattern_add_color_stop_rgba(lit, 0.0, 1.0, 0.92, 0.72, 0.14);
+	cairo_pattern_add_color_stop_rgba(lit, 0.45, 0.0, 0.0, 0.0, 0.0);
+	cairo_pattern_add_color_stop_rgba(lit, 1.0, 0.0, 0.0, 0.0, 0.30);
+	cairo_set_source(cr, lit);
+	cairo_paint(cr);
+	cairo_pattern_destroy(lit);
+
+	/* the brass lip along its top edge, and the line of shade under it */
+	double lip = fmax(3.0, h * 0.06);
+	cairo_pattern_t *brass = cairo_pattern_create_linear(0, y0, 0, y0 + lip);
+	cairo_pattern_add_color_stop_rgb(brass, 0.0, 0.93, 0.80, 0.47);
+	cairo_pattern_add_color_stop_rgb(brass, 0.5, 0.78, 0.60, 0.28);
+	cairo_pattern_add_color_stop_rgb(brass, 1.0, 0.50, 0.36, 0.14);
+	cairo_set_source(cr, brass);
+	cairo_rectangle(cr, x0, y0, w, lip);
+	cairo_fill(cr);
+	cairo_pattern_destroy(brass);
+	cairo_set_source_rgba(cr, 0.04, 0.02, 0.01, 0.40);
+	cairo_rectangle(cr, x0, y0 + lip, w, 1.5);
+	cairo_fill(cr);
+	cairo_restore(cr);
+
+	/* the felt let into it, dark where the lip overhangs it */
+	double m = h * 0.13, fx = x0 + m, fy = y0 + lip + h * 0.09, fw = w - 2.0 * m;
+	double fh = y0 + h - m * 0.9 - fy;
+	cairo_save(cr);
+	desk_rounded_path(cr, fx, fy, fw, fh, h * 0.07);
+	cairo_clip(cr);
+	cairo_pattern_t *felt = cairo_pattern_create_linear(0, fy, 0, fy + fh);
+	cairo_pattern_add_color_stop_rgb(felt, 0.0, 0.17, 0.32, 0.23);
+	cairo_pattern_add_color_stop_rgb(felt, 1.0, 0.09, 0.20, 0.14);
+	cairo_set_source(cr, felt);
+	cairo_paint(cr);
+	cairo_pattern_destroy(felt);
+	overlay_grain(cr, fx, fy, fw, fh, 1.0);
+	cairo_pattern_t *sh = cairo_pattern_create_linear(0, fy, 0, fy + h * 0.22);
+	cairo_pattern_add_color_stop_rgba(sh, 0.0, 0.0, 0.0, 0.0, 0.50);
+	cairo_pattern_add_color_stop_rgba(sh, 1.0, 0.0, 0.0, 0.0, 0.0);
+	cairo_set_source(cr, sh);
+	cairo_rectangle(cr, fx, fy, fw, h * 0.22);
+	cairo_fill(cr);
+	cairo_pattern_destroy(sh);
+	cairo_restore(cr);
+	/* the edge of the felt where it meets the wood */
+	cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.16);
+	cairo_set_line_width(cr, 1.0);
+	desk_rounded_path(cr, fx + 0.5, fy + fh + 0.5 - 1.0, fw - 1.0, 1.0, h * 0.07);
+	cairo_stroke(cr);
+
+	/* a brass screw at each end */
+	for (int s = 0; s < 2; s++) {
+		double sx = s ? x0 + w - m * 0.5 : x0 + m * 0.5, sy = y0 + h * 0.60, sr = fmax(2.2, h * 0.035);
+		cairo_pattern_t *g1 = cairo_pattern_create_radial(sx - sr * 0.3, sy - sr * 0.3, 0.2, sx, sy, sr);
+		cairo_pattern_add_color_stop_rgb(g1, 0.0, 0.95, 0.82, 0.50);
+		cairo_pattern_add_color_stop_rgb(g1, 1.0, 0.45, 0.32, 0.12);
+		cairo_set_source(cr, g1);
+		cairo_arc(cr, sx, sy, sr, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g1);
+		cairo_set_source_rgba(cr, 0.12, 0.07, 0.02, 0.8);
+		cairo_set_line_width(cr, 0.9);
+		cairo_move_to(cr, sx - sr * 0.7, sy + sr * 0.25);
+		cairo_line_to(cr, sx + sr * 0.7, sy - sr * 0.25);
+		cairo_stroke(cr);
+	}
+
+	/* what stands on the felt: the one the hand is over last, so it is
+	 * over its neighbours */
+	double ppu = g.size / 1.42;
+	double base = fy + fh * 0.5;
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < n; i++) {
+			if ((i == hover) != (pass == 1) || i == carry) {
+				continue;
+			}
+			const struct rail_pic *p = rail_pic_for(&items[i], ppu);
+			if (!p) {
+				continue;
+			}
+			double cx = g.first + g.pitch * i;
+			bool up = i == hover, down = i == pressed && i == hover;
+			double lift = down ? -1.0 : (up ? 4.0 : 0.0);
+			contact_shadow(cr, cx - g.size * 0.50, base + g.size * 0.18 - (up ? 0 : 1.0),
+				g.size, g.size * 0.34, up ? 0.40 : 0.55);
+			cairo_save(cr);
+			cairo_translate(cr, cx, base - lift);
+			if (up) {
+				cairo_scale(cr, 1.07, 1.07);
+			}
+			cairo_set_source_surface(cr, p->surf, -p->ax, -p->ay);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
+	}
+
+	/* the one in the hand: up off the felt, wherever the hand has it */
+	if (carry >= 0 && carry < n) {
+		const struct rail_pic *p = rail_pic_for(&items[carry], ppu);
+		if (p) {
+			double cx = clampf(carry_x, x0 + g.pitch * 0.4, x0 + w - g.pitch * 0.4);
+			contact_shadow(cr, cx - g.size * 0.55, base + g.size * 0.30, g.size * 1.1,
+				g.size * 0.40, 0.30);
+			cairo_save(cr);
+			cairo_translate(cr, cx, base - 9.0);
+			cairo_scale(cr, 1.12, 1.12);
+			cairo_set_source_surface(cr, p->surf, -p->ax, -p->ay);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
+	}
+
+	/* and over it, a small brass plate that says what it is */
+	if (hover >= 0 && hover < n && hover != carry && items[hover].name[0]) {
+		double fs = clampf(h * 0.24, 11.0, 17.0);
+		double tw = rail_text_w(cr, items[hover].name, fs);
+		double pw = tw + fs * 1.3, ph = fs * 1.55;
+		double cx = g.first + g.pitch * hover;
+		double px = clampf(cx - pw * 0.5, box[0] + 2.0, box[0] + box[2] - pw - 2.0);
+		double py = y0 - ph - 7.0;
+		if (gfx_shadows()) {
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.22);
+			desk_rounded_path(cr, px + 1.0, py + 3.0, pw, ph, 3.0);
+			cairo_fill(cr);
+		}
+		cairo_pattern_t *pl = cairo_pattern_create_linear(0, py, 0, py + ph);
+		cairo_pattern_add_color_stop_rgb(pl, 0.0, 0.90, 0.76, 0.44);
+		cairo_pattern_add_color_stop_rgb(pl, 1.0, 0.66, 0.50, 0.22);
+		desk_rounded_path(cr, px, py, pw, ph, 3.0);
+		cairo_set_source(cr, pl);
+		cairo_fill_preserve(cr);
+		cairo_pattern_destroy(pl);
+		cairo_set_source_rgba(cr, 0.28, 0.18, 0.06, 0.85);
+		cairo_set_line_width(cr, 1.0);
+		cairo_stroke(cr);
+		double tx = px + pw * 0.5, ty = py + ph * 0.5 + fs * 0.34;
+		show_text_as(cr, DESK_FONT_ENGRAVE, items[hover].name, tx, ty + 1.0, fs, true,
+			1.0, 0.93, 0.72, 0.55, 0);
+		show_text_as(cr, DESK_FONT_ENGRAVE, items[hover].name, tx, ty, fs, true,
+			0.22, 0.14, 0.05, 0.95, 0);
+	}
+}
+
 bool desk_drawer_handle_hit(int screen_w, int screen_h, double px, double py, double open)
 {
 	struct room_xf xf;
@@ -16031,10 +16370,106 @@ static double book_text(cairo_t *cr, const char *s, double x, double y, double w
 	return e.x_advance;
 }
 
-/* One line of the index: the program's mark, its name and what it is, a
- * leader of dots and the shelf it is on. */
+/* ---- the pin on each line of the index ---------------------------------
+ * A drawing pin by the program's mark: lying about, faint, when the program
+ * is not on the rail along the front of the desk; pressed into the paper,
+ * red, when it is. The hand on it brightens it, and a click turns one into
+ * the other. The compositor says which programs are pinned. */
+static pthread_mutex_t g_pin_lock = PTHREAD_MUTEX_INITIALIZER;
+static char (*g_pin_ids)[96];
+static int g_pin_n;
+
+void desk_book_set_pinned(const char *const *ids, int n)
+{
+	char (*copy)[96] = n > 0 ? calloc((size_t)n, sizeof *copy) : NULL;
+	int m = 0;
+	for (int i = 0; copy && i < n; i++) {
+		if (ids[i] && ids[i][0]) {
+			snprintf(copy[m++], sizeof copy[0], "%s", ids[i]);
+		}
+	}
+	pthread_mutex_lock(&g_pin_lock);
+	free(g_pin_ids);
+	g_pin_ids = copy;
+	g_pin_n = m;
+	pthread_mutex_unlock(&g_pin_lock);
+}
+
+static bool book_is_pinned(const char *id)
+{
+	bool on = false;
+	pthread_mutex_lock(&g_pin_lock);
+	for (int i = 0; i < g_pin_n && !on; i++) {
+		on = strcmp(g_pin_ids[i], id) == 0;
+	}
+	pthread_mutex_unlock(&g_pin_lock);
+	return on;
+}
+
+/* the width of its place at the head of a line, in line heights */
+#define BOOK_PIN_W 0.80
+
+static void book_pin(cairo_t *cr, double x, double y, double s, bool on, bool hot)
+{
+	double cx = x + s * 0.5, cy = y + s * 0.5;
+	double a = on ? 1.0 : (hot ? 0.95 : 0.46);
+	cairo_save(cr);
+	if (hot) {
+		/* the hand is on it: ringed, as a thing to press */
+		cairo_set_source_rgba(cr, 0.62, 0.18, 0.10, 0.65);
+		cairo_set_line_width(cr, fmax(s * 0.05, 1.0));
+		cairo_arc(cr, cx, cy, s * 0.43, 0, 2 * M_PI);
+		cairo_stroke(cr);
+	}
+	if (!on) {
+		/* the place for one: a ring, and a pin lying beside it */
+		cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, a * 0.8);
+		cairo_set_line_width(cr, fmax(s * 0.035, 0.7));
+		cairo_arc(cr, cx, cy + s * 0.04, s * 0.30, 0, 2 * M_PI);
+		cairo_stroke(cr);
+	}
+	double hr = s * 0.17, hy = on ? cy - s * 0.02 : cy - s * 0.05;
+	if (on) {
+		/* it is in the paper: its shadow, and the flat of it */
+		cairo_save(cr);
+		cairo_translate(cr, cx + s * 0.05, hy + s * 0.13);
+		cairo_scale(cr, 1.0, 0.45);
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.28);
+		cairo_arc(cr, 0, 0, hr * 1.5, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_restore(cr);
+	} else {
+		/* the needle, as it lies */
+		cairo_set_source_rgba(cr, 0.40, 0.40, 0.42, a);
+		cairo_set_line_width(cr, fmax(s * 0.04, 0.8));
+		cairo_move_to(cr, cx - s * 0.02, hy + hr * 0.5);
+		cairo_line_to(cr, cx - s * 0.20, hy + s * 0.34);
+		cairo_stroke(cr);
+	}
+	/* the head: a dome, lit from the top left */
+	cairo_pattern_t *g = cairo_pattern_create_radial(cx - hr * 0.35, hy - hr * 0.35, hr * 0.1,
+		cx, hy, hr * 1.15);
+	if (on || hot) {
+		cairo_pattern_add_color_stop_rgba(g, 0.0, 0.98, 0.50, 0.40, a);
+		cairo_pattern_add_color_stop_rgba(g, 0.45, 0.80, 0.14, 0.11, a);
+		cairo_pattern_add_color_stop_rgba(g, 1.0, 0.42, 0.05, 0.04, a);
+	} else {
+		cairo_pattern_add_color_stop_rgba(g, 0.0, 0.62, 0.56, 0.48, a);
+		cairo_pattern_add_color_stop_rgba(g, 1.0, 0.32, 0.27, 0.21, a);
+	}
+	cairo_set_source(cr, g);
+	cairo_arc(cr, cx, hy, hr, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cairo_pattern_destroy(g);
+	cairo_restore(cr);
+}
+
+/* One line of the index: a pin, the program's mark, its name and what it
+ * is, a leader of dots and the shelf it is on. pin_hot: the hand is on the
+ * pin, not elsewhere on the line. */
 static void book_entry(cairo_t *cr, const struct book_geom *g, const double r[4],
-	const struct desk_app *a, const struct desk_app_list *l, bool hot, bool chosen)
+	const struct desk_app *a, const struct desk_app_list *l, bool hot, bool chosen,
+	bool pin_hot)
 {
 	(void)g;
 	double x = r[0], y = r[1], w = r[2], rh = r[3];
@@ -16046,6 +16481,9 @@ static void book_entry(cairo_t *cr, const struct book_geom *g, const double r[4]
 		cairo_fill(cr);
 		cairo_restore(cr);
 	}
+	book_pin(cr, x, y + rh * 0.10, rh * BOOK_PIN_W, book_is_pinned(a->id), hot && pin_hot);
+	x += rh * BOOK_PIN_W;
+	w -= rh * BOOK_PIN_W;
 	double is = rh * 0.70, ix = x, iy = y + (rh - is) * 0.5;
 	cairo_surface_t *ic = desk_app_icon(a);
 	if (ic) {
@@ -16282,7 +16720,8 @@ static void book_page(cairo_t *cr, int w, int h, const struct book_geom *g,
 			}
 			double r[4];
 			book_row_rect(g, side, bi->row[i], r);
-			book_entry(cr, g, r, &l->apps[bi->app[i]], l, lk->hover == i, lk->sel == i);
+			book_entry(cr, g, r, &l->apps[bi->app[i]], l, lk->hover == i, lk->sel == i,
+				lk->hover_pin);
 		}
 		if (side) {
 			/* nothing of the index on this page: the one chosen, at large */
@@ -17789,7 +18228,8 @@ int desk_book_hit(int w, int h, const struct desk_book_look *lk, double x, doubl
 		book_row_rect(&g, bi->side[i], bi->row[i], r);
 		if (x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
 			*arg = i;
-			return DESK_BOOK_HIT_ENTRY;
+			/* the pin at the head of the line is its own place */
+			return x < r[0] + r[3] * BOOK_PIN_W ? DESK_BOOK_HIT_PIN : DESK_BOOK_HIT_ENTRY;
 		}
 	}
 	double cz = g.bw * 0.07;

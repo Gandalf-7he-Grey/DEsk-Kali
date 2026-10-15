@@ -213,6 +213,7 @@ struct shell_conf {
 	bool clock_12h;
 	char language[16];          /* "auto", "en", "ja", "zh", ... */
 	bool drawer_closes;         /* the drawer goes back after something is used */
+	bool taskbar;               /* the rail along the front of the desk: programs in reach */
 	bool take_sheet;            /* ALL APPS: the sheet is carried down for the window */
 	bool fold_drawer;           /* a folded window goes into the drawer */
 	double sound;               /* how loud the desk is: 0 silent */
@@ -256,6 +257,15 @@ enum drawer_kind {
 };
 
 #define DRAWER_MAX 32
+
+/* a program pinned to the rail along the front of the desk: DEsk's standard
+ * program for a job (whichever it is here), or one by its desktop file id */
+#define TB_MAX 24
+struct tb_pin {
+	bool std;
+	int role;                     /* a standard program: which (DESK_STD_*) */
+	char id[96];                  /* any other: its desktop file id */
+};
 
 struct drawer_entry {
 	enum drawer_kind kind;
@@ -778,6 +788,26 @@ struct desk_server {
 	int drw_gap;               /* the place held open for it, or -1 */
 	bool drw_over;             /* over the drawer, not the desk */
 	bool drw_sprung;           /* the drawer has come out for it */
+	/* The rail along the front of the desk: the programs pinned to it (the
+	 * pins, which are kept), and of those the ones that are programs here, as
+	 * the places along it (tb_pin_of: which pin each is). */
+	struct wlr_scene_buffer *tb_node;
+	bool tb_shown;
+	unsigned tb_sig;           /* what it was last drawn for */
+	struct tb_pin tb_pins[TB_MAX];
+	int tb_pin_n;
+	bool tb_default;           /* what it comes with, not yet kept */
+	unsigned tb_pin_gen;       /* counts every change to the pins */
+	int tb_n;
+	int tb_pin_of[TB_MAX];
+	int tb_hover, tb_press;    /* the place under the hand, and held down: or -1 */
+	uint32_t tb_button;
+	double tb_px, tb_py;       /* where it was put down */
+	bool tb_carrying;          /* in the hand, along the rail */
+	int tb_carry, tb_to;       /* the place it came from, the place it would go to */
+	double tb_carry_x;         /* and where the hand has it, along the desk */
+	/* the pointer is on the pin of a line of the book, not the line */
+	bool book_pin_hot;
 	double drw_gx, drw_gy;     /* where on it the hand has hold of it */
 	struct wlr_scene_buffer *drw_carry_node;
 	double drw_carry_ax, drw_carry_ay;
@@ -2312,6 +2342,11 @@ static int sheet_alloc_slot(struct desk_server *server)
 }
 
 static struct wlr_box work_area(struct desk_server *server);
+static int taskbar_reserve(struct desk_server *server);
+static void taskbar_pin_toggle(struct desk_server *server, const char *id);
+static void taskbar_publish(struct desk_server *server);
+static bool taskbar_busy(const struct desk_server *server);
+static void taskbar_drag(struct desk_server *server);
 
 /* Where a folded sheet is put down: along the front of the desk, from the
  * left, a row at a time -- the next row further back, when one is full. */
@@ -2865,6 +2900,7 @@ static void book_look_still(const struct desk_server *server, struct desk_book_l
 	 * again for every line it crossed */
 	lk->hover = -1;
 	lk->hover_tab = -1;
+	lk->hover_pin = false;
 	if (lk->open_t < 0.999) {
 		return;
 	}
@@ -2903,6 +2939,7 @@ static uint64_t book_still_key(struct desk_server *server, const struct desk_boo
 	k = key_add(k, &gen, sizeof gen);
 	k = key_add(k, &taken, sizeof taken);
 	k = key_add(k, &tk, sizeof tk);
+	k = key_add(k, &server->tb_pin_gen, sizeof server->tb_pin_gen);
 	k = key_add(k, &server->binder_t, sizeof server->binder_t);
 	k = key_add(k, size, sizeof size);
 	k = key_add(k, server->book_q, strlen(server->book_q));
@@ -3075,6 +3112,7 @@ static void book_look_hot(const struct desk_server *server, struct desk_book_loo
 	book_look_still(server, lk);
 	lk->hover = server->binder_sel;
 	lk->hover_tab = server->book_tab;
+	lk->hover_pin = server->book_pin_hot;
 }
 
 /* a patch of the book where the hand is on it (part: desk_draw_book_hot) */
@@ -3300,6 +3338,7 @@ static void paint_shelf_body(struct desk_server *server)
 					uint64_t hk = key_add(bk, &part, sizeof part);
 					hk = key_add(hk, &hot.hover, sizeof hot.hover);
 					hk = key_add(hk, &hot.hover_tab, sizeof hot.hover_tab);
+					hk = key_add(hk, &hot.hover_pin, sizeof hot.hover_pin);
 					a.part = part;
 					sh_put_on(server, SH_BOOKHOT + part, SH_BINDER, hk, force, hb,
 						sh_book_hot_draw, &a);
@@ -3743,6 +3782,7 @@ static void book_look(const struct desk_server *server, struct desk_book_look *l
 	lk->hover = server->binder_sel;
 	lk->sel = server->book_sel;
 	lk->hover_tab = server->book_tab;
+	lk->hover_pin = server->book_pin_hot;
 	lk->open_t = clampf_d(server->binder_t, 0.0, 1.0);
 	lk->ime = server->book_ime;
 }
@@ -4003,6 +4043,9 @@ static void book_ime_key(uint32_t sym, uint32_t keycode, uint32_t mods, bool tak
 
 static void book_begin(struct desk_server *server)
 {
+	/* which lines have their pin pressed in */
+	taskbar_publish(server);
+	server->book_pin_hot = false;
 	server->book_q[0] = '\0';
 	server->book_caret = 0;
 	book_clear_ime(server);
@@ -4158,11 +4201,15 @@ static void book_hover_at(struct desk_server *server, double x, double y)
 	int arg = -1;
 	int z = server->binder_moving ? DESK_BOOK_HIT_NONE
 		: desk_book_hit(server->desk_w, server->desk_h, &lk, x, y, &arg);
-	int sel = z == DESK_BOOK_HIT_ENTRY && !server->binder_pos_moving ? arg : -1;
+	int sel = (z == DESK_BOOK_HIT_ENTRY || z == DESK_BOOK_HIT_PIN) && !server->binder_pos_moving
+		? arg : -1;
+	/* on a line's pin, rather than the line */
+	bool pin = z == DESK_BOOK_HIT_PIN && sel >= 0;
 	int tab = z == DESK_BOOK_HIT_TAB ? arg : -1;
-	if (sel != server->binder_sel || tab != server->book_tab) {
+	if (sel != server->binder_sel || tab != server->book_tab || pin != server->book_pin_hot) {
 		server->binder_sel = sel;
 		server->book_tab = tab;
+		server->book_pin_hot = pin;
 		paint_shelf(server);
 		server_schedule_frames(server);
 	}
@@ -4181,6 +4228,27 @@ static void book_press(struct desk_server *server, double x, double y)
 	case DESK_BOOK_HIT_ENTRY:
 		book_take(server, arg);
 		break;
+	case DESK_BOOK_HIT_PIN: {
+		/* the pin: the program goes on the rail, or comes off it. The book
+		 * stays open, so a few can be pinned one after another. */
+		static int idx[2048];
+		int n = desk_book_matches(server->book_q, idx, 2048);
+		char id[96] = "";
+		if (arg >= 0 && arg < n && arg < 2048) {
+			const struct desk_app_list *l = desk_apps_acquire();
+			if (idx[arg] < l->n) {
+				snprintf(id, sizeof id, "%s", l->apps[idx[arg]].id);
+			}
+			desk_apps_release(l);
+		}
+		if (id[0]) {
+			taskbar_pin_toggle(server, id);
+			snd_at(server, DESK_SND_FELT_DROP, x, 1.0);
+			paint_shelf(server);
+			server_schedule_frames(server);
+		}
+		break;
+	}
 	case DESK_BOOK_HIT_TAB: {
 		int sp = desk_book_tab_spread(server->desk_w, server->desk_h, server->book_q, arg);
 		if (sp >= 0) {
@@ -9899,6 +9967,10 @@ static void terminal_open(void)
  *                                         auto follows the locale
  *   drawer_closes = yes | no              the drawer goes back in once
  *                                         something in it has been used
+ *   taskbar = yes | no                    a rail along the front of the
+ *                                         desk with the programs that are
+ *                                         in the drawer, to start with a
+ *                                         click while it is shut
  *   take_sheet = yes | no                 a program taken out of ALL APPS
  *                                         has its sheet carried down to the
  *                                         desk, and its window comes onto it
@@ -10005,6 +10077,7 @@ static void shell_conf_defaults(struct shell_conf *c)
 	c->clock_12h = false;
 	snprintf(c->language, sizeof c->language, "auto");
 	c->drawer_closes = true;
+	c->taskbar = true;
 	c->take_sheet = true;
 	c->fold_drawer = false;
 	c->sound = 1.0;
@@ -10310,6 +10383,8 @@ static void shell_conf_read_file(struct shell_conf *c, const char *path)
 			c->corner_hover = b;
 		} else if (!strcmp(key, "drawer_closes")) {
 			c->drawer_closes = b;
+		} else if (!strcmp(key, "taskbar")) {
+			c->taskbar = b;
 		} else if (!strcmp(key, "take_sheet")) {
 			c->take_sheet = b;
 		} else if (!strcmp(key, "fold_into_drawer")) {
@@ -11792,6 +11867,518 @@ static bool drawer_release(struct desk_server *server)
 	return false;
 }
 
+/* ---- the rail ---------------------------------------------------------
+ *
+ * Along the front of the desk, over the drawer's pull: the programs pinned
+ * to it, standing on a strip of felt, to start with one click while the
+ * drawer is shut. It holds programs and nothing else, and its list is its
+ * own, kept in ~/.config/desk/taskbar:
+ *
+ *   - a pin on each line of the ALL APPS book pins that program to the
+ *     rail, or takes it off again (book_press);
+ *   - a program on the rail is taken hold of and carried along it to where
+ *     it is to stand, the others making way; let go, it stays there;
+ *   - what it has to begin with is DEsk's four standard programs -- the
+ *     terminal, browser, file manager and text editor, whichever they are
+ *     here -- until something is pinned or moved.
+ *
+ * It is drawn when something about it changes, not every frame, and windows
+ * keep clear of it (work_area). It is not there while the drawer is out or
+ * the camera is anywhere but at the desk, at the lock, at login, with a
+ * window using the whole screen, or with `taskbar = no` in shell.conf. */
+
+static void taskbar_path(char *out, size_t n)
+{
+	const char *cfg = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	if (cfg && *cfg) {
+		snprintf(out, n, "%s/desk/taskbar", cfg);
+	} else if (home && *home) {
+		snprintf(out, n, "%s/.config/desk/taskbar", home);
+	} else {
+		out[0] = '\0';
+	}
+}
+
+static void taskbar_defaults(struct desk_server *server)
+{
+	server->tb_pin_n = 0;
+	for (int m = 0; m < DESK_STD_COUNT && server->tb_pin_n < TB_MAX; m++) {
+		server->tb_pins[server->tb_pin_n++] = (struct tb_pin){ .std = true, .role = m };
+	}
+	server->tb_default = true;
+}
+
+static void taskbar_save(struct desk_server *server)
+{
+	char path[512];
+	taskbar_path(path, sizeof path);
+	if (!path[0]) {
+		return;
+	}
+	conf_dirs_for(path);
+	char tmp[600];
+	snprintf(tmp, sizeof tmp, "%s.new", path);
+	FILE *f = fopen(tmp, "we");
+	if (!f) {
+		wlr_log(WLR_ERROR, "cannot keep the taskbar in %s", tmp);
+		return;
+	}
+	fprintf(f, "# DEsk's taskbar: the programs pinned to the rail along the front of the\n"
+		"# desk, in order: \"thing <terminal | browser | files | editor>\" (DEsk's\n"
+		"# standard program for it, whichever that is) or \"app <desktop file id>\".\n");
+	for (int i = 0; i < server->tb_pin_n; i++) {
+		const struct tb_pin *p = &server->tb_pins[i];
+		if (p->std) {
+			fprintf(f, "thing %s\n", desk_std_name(p->role));
+		} else {
+			fprintf(f, "app %s\n", p->id);
+		}
+	}
+	bool ok = fflush(f) == 0 && !ferror(f);
+	ok = fclose(f) == 0 && ok;
+	if (!ok || rename(tmp, path) != 0) {
+		wlr_log(WLR_ERROR, "cannot keep the taskbar in %s", path);
+		unlink(tmp);
+		return;
+	}
+	server->tb_default = false;
+}
+
+static void taskbar_load(struct desk_server *server)
+{
+	server->tb_hover = server->tb_press = -1;
+	taskbar_defaults(server);
+	char path[512];
+	taskbar_path(path, sizeof path);
+	FILE *f = path[0] ? fopen(path, "re") : NULL;
+	if (!f) {
+		return;
+	}
+	server->tb_pin_n = 0;
+	server->tb_default = false;
+	char line[256];
+	while (fgets(line, sizeof line, f) && server->tb_pin_n < TB_MAX) {
+		char *s = line;
+		while (*s == ' ' || *s == '\t') {
+			s++;
+		}
+		size_t len = strlen(s);
+		while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' '
+				|| s[len - 1] == '\t')) {
+			s[--len] = '\0';
+		}
+		struct tb_pin p = { 0 };
+		if (strncmp(s, "thing", 5) == 0 && (s[5] == ' ' || s[5] == '\t')) {
+			const char *name = s + 6;
+			while (*name == ' ' || *name == '\t') {
+				name++;
+			}
+			p.role = desk_std_parse(name);
+			if (p.role < 0) {
+				continue;
+			}
+			p.std = true;
+		} else if (strncmp(s, "app", 3) == 0 && (s[3] == ' ' || s[3] == '\t')) {
+			const char *id = s + 4;
+			while (*id == ' ' || *id == '\t') {
+				id++;
+			}
+			if (!*id) {
+				continue;
+			}
+			snprintf(p.id, sizeof p.id, "%s", id);
+		} else {
+			continue;
+		}
+		server->tb_pins[server->tb_pin_n++] = p;
+	}
+	fclose(f);
+}
+
+/* the program a pin is, if it is installed */
+static const struct desk_app *taskbar_app_of(const struct desk_app_list *l, const struct tb_pin *p)
+{
+	return p->std ? desk_apps_for_std(l, p->role) : desk_apps_find(l, p->id);
+}
+
+/* The pins that are programs here, in order, as places along the rail: which
+ * pin each is. (One for a program that has been taken off the machine is
+ * kept, in case it comes back, but not shown.) */
+static int taskbar_collect(const struct desk_server *server, int *pin_of)
+{
+	const struct desk_app_list *l = desk_apps_acquire();
+	int n = 0;
+	for (int i = 0; i < server->tb_pin_n; i++) {
+		if (taskbar_app_of(l, &server->tb_pins[i])) {
+			pin_of[n++] = i;
+		}
+	}
+	desk_apps_release(l);
+	return n;
+}
+
+/* Which programs the book is to show a pin pressed in for. */
+static void taskbar_publish(struct desk_server *server)
+{
+	const char *ids[TB_MAX];
+	int n = 0;
+	const struct desk_app_list *l = desk_apps_acquire();
+	for (int i = 0; i < server->tb_pin_n; i++) {
+		const struct desk_app *app = taskbar_app_of(l, &server->tb_pins[i]);
+		if (app) {
+			ids[n++] = app->id;
+		}
+	}
+	desk_book_set_pinned(ids, n);   /* copied, before the list is let go */
+	desk_apps_release(l);
+}
+
+/* Pin a program, or -- if it is pinned already -- take it off. */
+static void taskbar_pin_toggle(struct desk_server *server, const char *id)
+{
+	const struct desk_app_list *l = desk_apps_acquire();
+	int at = -1;
+	for (int i = 0; i < server->tb_pin_n && at < 0; i++) {
+		const struct desk_app *app = taskbar_app_of(l, &server->tb_pins[i]);
+		if (app && strcmp(app->id, id) == 0) {
+			at = i;
+		}
+	}
+	bool changed = false;
+	if (at >= 0) {
+		memmove(&server->tb_pins[at], &server->tb_pins[at + 1],
+			sizeof server->tb_pins[0] * (size_t)(server->tb_pin_n - at - 1));
+		server->tb_pin_n--;
+		changed = true;
+		wlr_log(WLR_INFO, "%s is taken off the taskbar", id);
+	} else if (server->tb_pin_n < TB_MAX && desk_apps_find(l, id)) {
+		struct tb_pin p = { 0 };
+		snprintf(p.id, sizeof p.id, "%s", id);
+		server->tb_pins[server->tb_pin_n++] = p;
+		changed = true;
+		wlr_log(WLR_INFO, "%s is pinned to the taskbar", id);
+	}
+	desk_apps_release(l);
+	if (changed) {
+		server->tb_pin_gen++;
+		taskbar_save(server);
+		taskbar_publish(server);
+	}
+}
+
+static int taskbar_reserve(struct desk_server *server)
+{
+	if (!server->conf.taskbar || server->tb_n <= 0 || server->desk_w < 200
+		|| server->desk_h < 200) {
+		return 0;
+	}
+	return desk_rail_reserve(server->desk_w, server->desk_h);
+}
+
+/* Is it to be seen now? */
+static bool taskbar_wanted(struct desk_server *server)
+{
+	if (!server->conf.taskbar || server->boot_on || locked(server) || console_up(server)
+		|| post_up(server) || shelf_up(server) || server->drawer_moving
+		|| server->drawer_t > 0.004 || server->desk_w < 200 || server->desk_h < 200) {
+		return false;
+	}
+	struct desk_toplevel *view;
+	wl_list_for_each(view, &server->toplevels, link) {
+		if (view->fullscreen) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void taskbar_hide(struct desk_server *server)
+{
+	if (server->tb_node && server->tb_shown) {
+		wlr_scene_node_set_enabled(&server->tb_node->node, false);
+	}
+	server->tb_shown = false;
+	server->tb_hover = server->tb_press = -1;
+	server->tb_carrying = false;
+	server->tb_button = 0;
+}
+
+/* The order things are in while one is in the hand: the others as they were,
+ * and it where it would be put down. */
+static int taskbar_order(const struct desk_server *server, int *order)
+{
+	int n = server->tb_n;
+	if (!server->tb_carrying) {
+		memcpy(order, server->tb_pin_of, sizeof order[0] * (size_t)n);
+		return n;
+	}
+	int rest[TB_MAX], m = 0;
+	for (int k = 0; k < n; k++) {
+		if (k != server->tb_carry) {
+			rest[m++] = server->tb_pin_of[k];
+		}
+	}
+	int to = server->tb_to < 0 ? 0 : (server->tb_to > m ? m : server->tb_to);
+	for (int j = 0; j < to; j++) {
+		order[j] = rest[j];
+	}
+	order[to] = server->tb_pin_of[server->tb_carry];
+	for (int j = to; j < m; j++) {
+		order[j + 1] = rest[j];
+	}
+	return n;
+}
+
+/* Draw it again, with the hand where it is. */
+static void taskbar_paint(struct desk_server *server)
+{
+	int w = server->desk_w, h = server->desk_h;
+	double box[4];
+	if (server->tb_n <= 0 || !desk_rail_box(w, h, server->tb_n, box)) {
+		taskbar_hide(server);
+		return;
+	}
+	prof_begin(PROF_DOCK);
+	int order[TB_MAX];
+	int n = taskbar_order(server, order);
+	struct desk_drawer_item items[TB_MAX];
+	const struct desk_app_list *l = desk_apps_acquire();
+	/* the standard programs have the thing that is theirs; a card for any
+	 * other of the same kind, so two can be told apart */
+	unsigned used = 0;
+	for (int k = 0; k < n; k++) {
+		const struct tb_pin *p = &server->tb_pins[order[k]];
+		if (p->std && p->role >= 0 && p->role < DESK_ICON_GEAR) {
+			used |= 1u << p->role;
+		}
+	}
+	for (int k = 0; k < n; k++) {
+		const struct tb_pin *p = &server->tb_pins[order[k]];
+		const struct desk_app *app = taskbar_app_of(l, p);
+		struct desk_drawer_item *it = &items[k];
+		memset(it, 0, sizeof *it);
+		it->look = DESK_LOOK_CARD;
+		if (!app) {
+			continue;
+		}
+		snprintf(it->name, sizeof it->name, "%s", app->name);
+		snprintf(it->initial, sizeof it->initial, "%s", app->initial);
+		it->seed = app->seed;
+		if (p->std) {
+			it->look = p->role;
+		} else if (app->model >= 0 && app->model < DESK_ICON_GEAR
+			&& !(used & (1u << app->model))) {
+			it->look = app->model;
+			used |= 1u << app->model;
+		} else {
+			it->icon = desk_app_icon(app);
+		}
+	}
+	struct desk_buf *buf = buf_create((int)box[2], (int)box[3]);
+	cairo_save(buf->cr);
+	cairo_translate(buf->cr, -box[0], -box[1]);
+	desk_rail_paint(buf->cr, w, h, items, n, server->tb_carrying ? -1 : server->tb_hover,
+		server->tb_press == server->tb_hover ? server->tb_press : -1,
+		server->tb_carrying ? server->tb_to : -1, server->tb_carry_x);
+	cairo_restore(buf->cr);
+	desk_apps_release(l);
+	scene_put(&server->tb_node, server->layer_drawer, buf, (int)box[0], (int)box[1],
+		(void *)(uintptr_t)DESK_ROLE_DOCK);
+	wlr_scene_node_raise_to_top(&server->tb_node->node);
+	wlr_scene_node_set_enabled(&server->tb_node->node, true);
+	server->tb_shown = true;
+	prof_end();
+	server_schedule_frames(server);
+}
+
+/* Once a frame: here or not, and drawn again if what is on it has changed.
+ * (What is on it is checked, not told: the pins, the programs there are
+ * and the size of the desk are a few numbers.) */
+static void taskbar_tick(struct desk_server *server)
+{
+	if (!taskbar_wanted(server)) {
+		taskbar_hide(server);
+		return;
+	}
+	const struct desk_app_list *l = desk_apps_acquire();
+	unsigned gen = l->generation;
+	desk_apps_release(l);
+	unsigned sig = 2166136261u;
+#define TB_MIX(v) (sig = (sig ^ (unsigned)(v)) * 16777619u)
+	TB_MIX(server->desk_w);
+	TB_MIX(server->desk_h);
+	TB_MIX(gen);
+	TB_MIX(server->tb_pin_gen);
+#undef TB_MIX
+	if (sig == server->tb_sig && server->tb_shown) {
+		return;
+	}
+	if (sig != server->tb_sig) {
+		taskbar_publish(server);   /* the programs there are may have changed what is pinned */
+	}
+	server->tb_sig = sig;
+	server->tb_n = taskbar_collect(server, server->tb_pin_of);
+	if (server->tb_n == 0) {
+		taskbar_hide(server);
+		return;
+	}
+	server->tb_hover = server->tb_press = -1;
+	server->tb_carrying = false;
+	taskbar_paint(server);
+}
+
+/* Where the pointer is over it: which place, or -1. The desk's own
+ * screen, and only while it is there to be touched. */
+static int taskbar_at(struct desk_server *server)
+{
+	if (!server->tb_shown || server->tb_n <= 0 || !taskbar_wanted(server)) {
+		return -1;
+	}
+	double px = server->cursor->x - server->layer_drawer->node.x;
+	double py = server->cursor->y - server->layer_drawer->node.y;
+	return desk_rail_hit(server->desk_w, server->desk_h, server->tb_n, px, py);
+}
+
+static void taskbar_hover_to(struct desk_server *server, int hover)
+{
+	if (hover == server->tb_hover) {
+		return;
+	}
+	server->tb_hover = hover;
+	if (server->tb_shown) {
+		taskbar_paint(server);
+	}
+}
+
+/* The pointer moved with nothing held: is it over the rail? Then it is the
+ * rail's -- over any window there -- and nothing under it is told. */
+static bool taskbar_motion(struct desk_server *server)
+{
+	int at = taskbar_at(server);
+	taskbar_hover_to(server, at);
+	if (at < 0) {
+		return false;
+	}
+	wlr_seat_pointer_clear_focus(server->seat);
+	wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "pointer");
+	return true;
+}
+
+/* A program on the rail held down, or in the hand. A little way is still a
+ * click -- a hand is not a pin -- and beyond that it is picked up, to be
+ * carried along the rail: the others make way for it where it would be put
+ * down. */
+static bool taskbar_busy(const struct desk_server *server)
+{
+	return server->tb_carrying || server->tb_press >= 0;
+}
+
+static void taskbar_drag(struct desk_server *server)
+{
+	double px = server->cursor->x - server->layer_drawer->node.x;
+	if (!server->tb_carrying) {
+		if (hypot(server->cursor->x - server->tb_px, server->cursor->y - server->tb_py) < 8.0
+			|| server->tb_n < 2) {
+			return;
+		}
+		server->tb_carrying = true;
+		server->tb_carry = server->tb_press;
+		server->tb_press = -1;
+		snd_at(server, DESK_SND_FELT_PICK, server->cursor->x, 1.0);
+	}
+	server->tb_carry_x = px;
+	server->tb_to = desk_rail_slot(server->desk_w, server->desk_h, server->tb_n, px);
+	wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "fleur");
+	taskbar_paint(server);
+}
+
+/* A hand put down on it. Only the left button does anything; the others
+ * are not passed on to the window behind. */
+static bool taskbar_press(struct desk_server *server, uint32_t button)
+{
+	int at = taskbar_at(server);
+	if (at < 0) {
+		return false;
+	}
+	server->tb_button = button;
+	server->tb_press = button == BTN_LEFT ? at : -1;
+	server->tb_px = server->cursor->x;
+	server->tb_py = server->cursor->y;
+	taskbar_hover_to(server, at);
+	if (server->tb_press >= 0) {
+		taskbar_paint(server);
+	}
+	return true;
+}
+
+/* A place along the rail, started. */
+static void taskbar_launch(struct desk_server *server, int place)
+{
+	if (place < 0 || place >= server->tb_n) {
+		return;
+	}
+	const struct desk_app_list *l = desk_apps_acquire();
+	const struct desk_app *app = taskbar_app_of(l, &server->tb_pins[server->tb_pin_of[place]]);
+	if (app) {
+		wlr_log(WLR_INFO, "taking %s from the taskbar", app->id);
+		snd_at(server, DESK_SND_FELT_PICK, server->cursor->x, 1.0);
+		desk_app_launch(app);
+	}
+	desk_apps_release(l);
+}
+
+/* ...and let go: carried, it is put down where it is; held, and still over
+ * the same one, it is started. */
+static bool taskbar_release(struct desk_server *server, uint32_t button)
+{
+	if (!server->tb_button || button != server->tb_button) {
+		return false;
+	}
+	bool carrying = server->tb_carrying;
+	int held = server->tb_press, to = server->tb_to;
+	int order[TB_MAX];
+	if (carrying) {
+		taskbar_order(server, order);
+	}
+	server->tb_button = 0;
+	server->tb_press = -1;
+	server->tb_carrying = false;
+	if (carrying) {
+		/* the shown pins keep the places the shown pins had, in the order
+		 * they now stand in; any not shown (a program taken off the
+		 * machine) stay where they were */
+		struct tb_pin was[TB_MAX];
+		memcpy(was, server->tb_pins, sizeof was[0] * (size_t)server->tb_pin_n);
+		bool changed = false;
+		for (int j = 0; j < server->tb_n; j++) {
+			if (order[j] != server->tb_pin_of[j]) {
+				changed = true;
+			}
+			server->tb_pins[server->tb_pin_of[j]] = was[order[j]];
+		}
+		(void)to;
+		snd_at(server, DESK_SND_FELT_DROP, server->cursor->x, 1.0);
+		if (changed) {
+			server->tb_pin_gen++;
+			taskbar_save(server);
+		}
+		/* drawn again by the next tick, as the order it is now */
+		server->tb_sig = 0;
+		server->tb_hover = -1;
+		taskbar_tick(server);
+		return true;
+	}
+	if (held >= 0 && held < server->tb_n) {
+		bool same = taskbar_at(server) == held;
+		taskbar_paint(server);
+		if (same) {
+			taskbar_launch(server, held);
+		}
+	}
+	return true;
+}
+
 /* Once a frame: along the row to where they go, and a program taken out
  * fading from the hand. */
 static void drawer_slide_tick(struct desk_server *server)
@@ -12105,7 +12692,7 @@ static struct wlr_box work_area(struct desk_server *server)
 		h = out->height;
 	}
 	int top = desk_tray_bottom(w, h);
-	int bottom = desk_drawer_pull_h(w, h);
+	int bottom = desk_drawer_pull_h(w, h) + taskbar_reserve(server);
 	/* a screen too short for that still gets somewhere to put a window */
 	if (h - top - bottom < 160) {
 		top = h / 5;
@@ -19529,6 +20116,7 @@ static void paper_press(struct desk_server *server, struct wlr_pointer_button_ev
 static void desk_hover_off(struct desk_server *server)
 {
 	drawer_hover_to(server, -1);
+	taskbar_hover_to(server, -1);
 	clock_track(server, false);
 	slips_track(server, false);
 	if (shelf_up(server) && server->shelf_binder < 0) {
@@ -19573,6 +20161,12 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 		} else {
 			cursor_for_edges(server, 0);
 		}
+		return;
+	}
+	/* a program on the rail held down or carried along it */
+	if (taskbar_busy(server)) {
+		taskbar_drag(server);
+		wlr_seat_pointer_clear_focus(server->seat);
 		return;
 	}
 	if (server->cursor_mode == DESK_CUR_MOVE) {
@@ -19706,6 +20300,13 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 			server->cursor->x, server->cursor->y));
 		return;
 	}
+	/* the rail along the front of the desk is over the paper, windows too */
+	if (taskbar_motion(server)) {
+		clock_track(server, false);
+		slips_track(server, false);
+		drawer_hover_to(server, -1);
+		return;
+	}
 	bool on_clock = clock_track(server, !window_under(server));
 	bool on_slip = slips_track(server, !window_under(server));
 	drawer_hover_to(server, window_under(server) || on_clock || on_slip ? -1
@@ -19798,6 +20399,9 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		return;
 	}
 	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		if (taskbar_release(server, event->button)) {
+			return;
+		}
 		if (server->agd_drag) {
 			/* let go of the ruler */
 			server->agd_drag = false;
@@ -19841,6 +20445,12 @@ static void server_cursor_button(struct wl_listener *listener, void *data)
 		if (!paper_moved(server)) {
 			paper_press(server, event);
 		}
+		return;
+	}
+
+	/* The rail along the front of the desk: a program on it is started by
+	 * a click. */
+	if (taskbar_press(server, event->button)) {
 		return;
 	}
 
@@ -20470,6 +21080,7 @@ static void output_frame_work(struct desk_server *server)
 	throws_tick(server);
 	drawer_tick(server);
 	drawer_slide_tick(server);
+	taskbar_tick(server);
 	shelf_tick(server);
 	console_tick(server);
 	post_tick(server);
@@ -22272,6 +22883,7 @@ int main(int argc, char **argv)
 	server.headless_h = 1000;
 	server.screenshot_delay_ms = 2500;
 	drawer_load(&server);
+	taskbar_load(&server);
 	shell_conf_poll(&server);
 	/* the room starts dark, and the clock counts it being made */
 	server.boot_on = true;
@@ -22482,6 +23094,7 @@ int main(int argc, char **argv)
 	 * looking at the desk, and nothing on it should show through */
 	server.layer_shelf = wlr_scene_tree_create(&server.scene->tree);
 	server.shelf_hover = -1;
+	server.tb_hover = server.tb_press = -1;
 	server.hover_from = -1;
 	server.shelf_binder = -1;
 	server.binder_sel = -1;

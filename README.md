@@ -2,7 +2,11 @@
 
 # DEsk
 
+> **DEsk-Kali** is a fork of [fyzugx/DEsk](https://github.com/fyzugx/DEsk) with a **taskbar** (a rail of pinned programs along the front of the desk) and **Kali Linux support** (`scripts/install_kali.sh`). [Install on Kali](#install-on-kali-linux) · [what changed](#credits-and-changes)
+
 **v0.1.2 (BETA)** -- v0.1, the first public release, with fixes and an installer for Fedora. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
+
+Problems with the taskbar or the Kali installer: [open an issue here](https://github.com/Gandalf-7he-Grey/DEsk-Kali/issues) -- the Discord below is the original project's.
 
 I've created a Discord server!
 You can also report bugs and submit ideas for new features here!
@@ -32,9 +36,15 @@ back of the desk. The room is ray-traced, and one desk lamp lights all of it.
 
 ## Install
 
-Download the latest release from the
-[Releases page](https://github.com/fyzugx/DEsk/releases) and unpack it (or
-clone this repository). Then, in its folder, run the line for your system:
+Clone this repository (the original project's [Releases page](https://github.com/fyzugx/DEsk/releases)
+has its own copy, without the taskbar and the Kali installer):
+
+```
+git clone https://github.com/Gandalf-7he-Grey/DEsk-Kali.git
+cd DEsk-Kali
+```
+
+Then, in its folder, run the line for your system:
 
 **Debian 13**
 
@@ -60,6 +70,12 @@ sudo sh scripts/install_arch.sh
 sudo sh scripts/install_fedora.sh
 ```
 
+**Kali Linux** (builds its own wlroots 0.18.3 beside the system's; see below)
+
+```
+sh scripts/install_kali.sh
+```
+
 Then log out and choose **DEsk** on the login screen.
 
 - It shows what it will install and asks first. `--yes` takes the suggested
@@ -72,6 +88,50 @@ Then log out and choose **DEsk** on the login screen.
 
 More options, building by hand and running DEsk in a window are under
 [Build](#build) and [Run](#run).
+
+### Install on Kali Linux
+
+Kali is a rolling release and its wlroots (0.20 at the time of writing) is newer
+than the 0.18 DEsk is built on, so the other installers stop there.
+`install_kali.sh` builds wlroots 0.18.3 from its release into `/opt/desk-wlroots`,
+used by DEsk alone through its run path -- nothing else on the system is touched --
+then builds DEsk against it and puts it on the login screen.
+
+```
+sudo apt install git
+git clone https://github.com/Gandalf-7he-Grey/DEsk-Kali.git
+cd DEsk-Kali
+sh scripts/install_kali.sh
+```
+
+It asks before installing packages (`--yes` does not; `--plan` only says what it
+would do). Run it as yourself, not with `sudo`: it asks for sudo when it needs to.
+It takes a few minutes, mostly building wlroots; later runs keep wlroots.
+
+Then try it as a window in your current session:
+
+```
+desk -s xfce4-terminal
+```
+
+and, when that works, log out and choose **DEsk** on the login screen.
+
+- The programs DEsk is meant to be used with (file manager, editor, ...):
+  `sh scripts/install-desktop.sh`. `desk-settings --check` says what each row of
+  Shell Settings would open.
+- To update: `git pull`, then `sh scripts/install_kali.sh` again. Your settings stay.
+- To remove it: see [docs/KALI.md](docs/KALI.md#remove).
+- If something goes wrong: `~/.local/state/desk/session.log` and
+  `~/.local/state/desk/install.log`. More in [docs/KALI.md](docs/KALI.md).
+
+### The taskbar
+
+A rail along the front of the desk, over the drawer's handle, holds the programs
+you pin to it. **Click** one to start it. **Drag** one along the rail to move it.
+**Pin** a program with the pin at the head of its line in the ALL APPS book
+(`Super+A`, then the book); the same pin takes it off. It starts with DEsk's four
+standard programs. `taskbar = no` in `~/.config/desk/shell.conf` turns it off. The
+list is kept in `~/.config/desk/taskbar`.
 
 ## What's on the desk
 
@@ -90,6 +150,13 @@ there -- its material, the light on it, its shadow and the wear of use.
   It holds the things you put in it: any app, or a folded window. Out of
   the box it holds DEsk's standard programs (below) and a screwdriver that
   opens Shell Settings.
+  Along the front of the desk, over the drawer's handle, runs a **rail**: a
+  walnut rail with a brass lip and a strip of felt, with the programs you
+  have **pinned** to it standing on the felt -- one click starts one. Pin a
+  program with the pin at the head of its line in the ALL APPS book (the
+  same pin takes it off), and carry one along the rail with the mouse to put
+  it where you like. It starts with DEsk's four standard programs, and
+  `taskbar = no` in `shell.conf` turns it off.
 - **The bookshelf holds your apps** (`Super+A`, or the ALL APPS plate).
   Each category is a ring binder whose sheets fan from a single ring.
   Take a sheet and it is carried down to the desk, where the app's window
@@ -421,6 +488,9 @@ and the removal of what the old name, DeskWM, left behind (after asking).
 Every program Shell Settings' System tab opens is installed, `--no-apps` or
 not, and at the end `desk-settings --check` lists what each row opens (or
 which package would bring it).
+On **Kali Linux**, whose rolling wlroots is newer than the 0.18 DEsk is built on,
+use `sh scripts/install_kali.sh` (or `install_session.sh`, which picks it): it builds
+wlroots 0.18.3 next to the system's, for DEsk alone -- see [docs/KALI.md](docs/KALI.md).
 On other distributions, install the requirements and run `scripts/install.sh`.
 Or from a TTY: `desk-session`.
 
@@ -503,6 +573,30 @@ was written by Claude (Anthropic's AI model) under the author's direction:
 the author decided what DEsk should be and how it should look, tested it on
 real machines, and reviewed what went in. Reports and patches are welcome
 all the same.
+
+## Credits and changes
+
+This is a modified copy of [DEsk](https://github.com/fyzugx/DEsk) by fyzugx
+("The DEsk authors"), based on v0.1.2 (commit `195435a`), used under the MIT
+license (see [LICENSE](LICENSE)). It is not affiliated with or endorsed by the
+original author. `git diff 195435a HEAD` lists every change.
+
+**Changed from the original**
+
+- **Taskbar**: a rail of pinned programs, a pin on each line of ALL APPS, drag to
+  reorder (`taskbar` in `shell.conf`).
+- **Kali Linux support**: `scripts/install_kali.sh`, `docs/KALI.md`, and
+  `install_session.sh` picking it on Kali.
+
+**Built on**
+
+- [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) 0.18.3 (MIT): the
+  Kali installer downloads and builds it; it is not part of this repository.
+- Cairo, Wayland and the other free software DEsk is built from, installed as
+  separate packages.
+
+These changes were made with the help of Claude (Anthropic's AI model) and tested
+by gandalf-7he-grey on Kali Linux.
 
 ## License
 

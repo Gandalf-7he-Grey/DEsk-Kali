@@ -299,6 +299,7 @@ struct desk_book_look {
 	int hover, sel, hover_tab;
 	double open_t;
 	bool ime;
+	bool hover_pin;     /* the pointer is on the pin of the line hover, not the line */
 };
 #define DESK_BOOK_TABS 27
 enum {
@@ -309,6 +310,7 @@ enum {
 	DESK_BOOK_HIT_FIND,     /* the line to write on */
 	DESK_BOOK_HIT_PREV,     /* the corner of the left page: back a leaf */
 	DESK_BOOK_HIT_NEXT,     /* the corner of the right page: on a leaf */
+	DESK_BOOK_HIT_PIN,      /* *arg: the line whose pin it is */
 };
 void desk_draw_book(cairo_t *cr, int w, int h, const struct desk_book_look *look);
 /* The same in two layers, for a compositor that keeps each as a sprite:
@@ -329,6 +331,10 @@ bool desk_book_hot_box(int w, int h, const struct desk_book_look *look, int part
 void desk_book_box(int w, int h, const struct desk_book_look *look, double box[4]);
 int desk_book_hit(int w, int h, const struct desk_book_look *look, double x, double y,
 	int *arg);
+/* Which programs are pinned to the rail along the front of the desk (by
+ * desktop file id): each line of the index shows a pin, standing in the
+ * paper when its program is one of these. The list is copied. */
+void desk_book_set_pinned(const char *const *ids, int n);
 /* The index for what is written: the programs that answer to it, as places
  * in the app list, best first (all of them A to Z for nothing written); up
  * to max of them into out; how many there are. */
@@ -799,6 +805,28 @@ bool desk_drawer_point(int screen_w, int screen_h, double open, double x, double
  * felt with its shadow under it, and its middle in it. */
 cairo_surface_t *desk_drawer_item_picture(int screen_w, int screen_h,
 	const struct desk_drawer_item *it, double *ax, double *ay);
+/* ---- the rail ----
+ * The programs kept in the drawer, along the front of the desk where they
+ * are in reach with the drawer shut. desk_rail_reserve is how much of the
+ * screen's foot windows keep clear for it (over the drawer's pull, which
+ * stays); desk_rail_box is what its picture covers, on the screen, for n
+ * things; the picture is painted with cr at the screen's own origin, so
+ * the caller moves it by the box's corner. hover and pressed are the
+ * thing under the hand and the one held down, or -1. */
+int desk_rail_height(int screen_w, int screen_h);
+int desk_rail_reserve(int screen_w, int screen_h);
+bool desk_rail_box(int screen_w, int screen_h, int n, double box[4]);
+int desk_rail_hit(int screen_w, int screen_h, int n, double px, double py);
+/* The place along the rail a hand at x is nearest, 0 to n - 1, over it or
+ * not: where a thing carried along it would go. */
+int desk_rail_slot(int screen_w, int screen_h, int n, double px);
+/* carry, if not -1, is the thing being carried: it is held up off the felt
+ * at carry_x, and its own place along the row is left open. */
+void desk_rail_paint(cairo_t *cr, int screen_w, int screen_h,
+	const struct desk_drawer_item *items, int n, int hover, int pressed, int carry,
+	double carry_x);
+cairo_surface_t *desk_rail_item_picture(const struct desk_drawer_item *it, double ppu,
+	double *ax, double *ay);
 /* A sheet folded away as just the packet -- no shadow, not turned -- for
  * laying in the drawer. */
 cairo_surface_t *desk_fold_packet(struct desk_fold *f);

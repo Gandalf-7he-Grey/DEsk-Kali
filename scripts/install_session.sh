@@ -6,9 +6,10 @@
 #   Debian 13 (and what is built on it)        scripts/install_debian.sh
 #   Ubuntu 24.04 / 26.04 (Mint, Pop!_OS...)    scripts/install_ubuntu.sh
 #   Arch Linux (EndeavourOS, Manjaro...)       scripts/install_arch.sh
+#   Kali Linux (rolling: wlroots too new)      scripts/install_kali.sh
 #   Fedora 43 and later (Nobara...)            scripts/install_fedora.sh
 #
-# The four take the same options, and everything you give this is handed
+# The installers take the same options, and everything you give this is handed
 # on as it is:
 #
 #   --yes          do not ask; take the answers it would suggest
@@ -48,7 +49,7 @@ fi
 
 if [ ! -r /etc/os-release ]; then
 	echo "install_session.sh: there is no /etc/os-release, so which Linux this is is not known." >&2
-	echo "Run scripts/install_debian.sh, install_ubuntu.sh, install_arch.sh or install_fedora.sh yourself." >&2
+	echo "Run scripts/install_debian.sh, install_ubuntu.sh, install_arch.sh, install_fedora.sh or install_kali.sh yourself." >&2
 	exit 1
 fi
 # shellcheck disable=SC1091
@@ -59,6 +60,7 @@ which=""
 for id in ${ID:-} ${ID_LIKE:-}; do
 	case "$id" in
 	ubuntu) which=ubuntu ;;
+	kali) which=kali ;;
 	debian) which=debian ;;
 	arch|archlinux) which=arch ;;
 	fedora) which=fedora ;;
