@@ -75,20 +75,6 @@ sudo sh scripts/install_fedora.sh
 ```
 sh scripts/install_kali.sh
 ```
-
-Then log out and choose **DEsk** on the login screen.
-
-- It shows what it will install and asks first. `--yes` takes the suggested
-  answers; `--no-apps` installs DEsk without the recommended programs.
-- The first login draws the room once: a few seconds on a GPU, longer
-  without one. After that it starts at once.
-- To update, get the new release and run the same line again. Your settings
-  are kept.
-- Something went wrong? See [Reporting a problem](#reporting-a-problem).
-
-More options, building by hand and running DEsk in a window are under
-[Build](#build) and [Run](#run).
-
 ### Install on Kali Linux
 
 Kali is a rolling release and its wlroots (0.20 at the time of writing) is newer
@@ -123,6 +109,20 @@ and, when that works, log out and choose **DEsk** on the login screen.
 - To remove it: see [docs/KALI.md](docs/KALI.md#remove).
 - If something goes wrong: `~/.local/state/desk/session.log` and
   `~/.local/state/desk/install.log`. More in [docs/KALI.md](docs/KALI.md).
+
+Then log out and choose **DEsk** on the login screen.
+
+- It shows what it will install and asks first. `--yes` takes the suggested
+  answers; `--no-apps` installs DEsk without the recommended programs.
+- The first login draws the room once: a few seconds on a GPU, longer
+  without one. After that it starts at once.
+- To update, get the new release and run the same line again. Your settings
+  are kept.
+- Something went wrong? See [Reporting a problem](#reporting-a-problem).
+
+More options, building by hand and running DEsk in a window are under
+[Build](#build) and [Run](#run).
+
 
 ### The taskbar
 
