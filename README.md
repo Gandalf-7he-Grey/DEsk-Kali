@@ -499,10 +499,7 @@ way ("this updates it", it says): what is installed is replaced, the last build
 is reused (or made afresh when it cannot be), and your settings and the traced
 room stay. All the installer says is also kept in
 `~/.local/state/desk/install.log` (the last run's) -- the thing to look at, or
-send, if it stops part way. A copy made for passing round carries SHA256SUMS,
-and the installer checks every file against it before building: a copy damaged
-on its way says which files are wrong and stops (copy it again; if a fresh copy
-is damaged too, suspect the machine's memory or disk -- memtest86+). A Japanese
+send, if it stops part way. A Japanese
 locale gets the Mozc converter among the suggested programs; IBus itself is
 installed for everyone but only runs for languages typed through an input
 method, or when one is set up.
